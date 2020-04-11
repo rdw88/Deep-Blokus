@@ -1,9 +1,7 @@
 from unittest import TestCase, main
-from unittest.mock import patch, Mock
+from unittest.mock import patch
 
 import blokus
-import random
-import os
 
 import numpy as np
 
@@ -200,7 +198,7 @@ class MoveTestCase(TestCase):
 
         # Piece has already been played
         with patch('blokus.Piece') as played_piece:
-            played_piece.is_played.return_value = True
+            played_piece.is_played = True
             move = blokus.Move(board, played_piece, (0, 0))
             self.assertFalse(move.is_valid())
 
@@ -430,19 +428,19 @@ class PieceTestCase(TestCase):
         self.assertEqual(blokus.Piece._get_value_of_block(piece, (2, 0)), 0)
 
 
-    @patch('blokus.Player')
-    def test_is_played(self, player):
+    def test_is_played(self):
+        player = blokus.RedPlayer()
         piece = blokus.Piece(np.array([
             [1, 1, 1]
         ]), player)
 
         player.unplayed_pieces = [ piece ]
 
-        self.assertFalse(piece.is_played())
+        self.assertFalse(piece.is_played)
 
-        player.unplayed_pieces.remove(piece)
+        player.play_piece(piece)
 
-        self.assertTrue(piece.is_played())
+        self.assertTrue(piece.is_played)
 
 
     @patch('blokus.Player')

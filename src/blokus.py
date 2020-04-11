@@ -1,8 +1,10 @@
 import json
 import numpy as np
 import abc
+import os
 
 from PIL import Image
+from timer import timer
 
 
 class Board:
@@ -57,7 +59,7 @@ class Board:
         return self.board[position[1]][position[0]]
 
 
-    def get_image(self):
+    def save(self, path):
         image = Image.new(mode='RGB', size=(Board.SIZE * 40, Board.SIZE * 40))
 
         for y in range(len(self.board)):
@@ -65,10 +67,15 @@ class Board:
                 image_position = (x * 40, y * 40)
                 image.paste(self.board[y][x].get_image(), image_position)
 
-        return image
+        if os.path.exists(path):
+            os.remove(path)
+
+        image.save(path)
 
 
 class Move:
+    _move_cache = dict()
+
     def __init__(self, board, piece, position, orientation=0):
         if not piece.get_anchors(orientation):
             raise ValueError(f'Orientation {orientation} is not valid for the provided piece!')
@@ -77,37 +84,64 @@ class Move:
         self._piece = piece
         self._position = position
         self._orientation = orientation
+        self._blocks_affected = None
+        self._is_anchored = False
+
+
+    @staticmethod
+    def new_move_or_get_from_cache(board, piece, position, orientation=0):
+        try:
+            move = Move._move_cache[piece][position[0]][position[1]][orientation]
+        except KeyError:
+            move = Move(board, piece, position, orientation)
+
+            if piece not in Move._move_cache:
+                Move._move_cache[piece] = dict()
+
+            if position[0] not in Move._move_cache[piece]:
+                Move._move_cache[piece][position[0]] = dict()
+
+            if position[1] not in Move._move_cache[piece][position[0]]:
+                Move._move_cache[piece][position[0]][position[1]] = dict()
+
+            Move._move_cache[piece][position[0]][position[1]][orientation] = move
+
+        return move
 
 
     def get_piece_matrix(self):
         return self._piece.orientations[self._orientation]
 
 
+    @timer
     def is_valid(self):
-        if self._piece.is_played():
+        if self._piece.is_played:
             return False
-
-        is_anchored = False
 
         for block in self.get_blocks_affected():
             if not block or not block.allows_player(self.player):
                 return False
 
-            if block.anchors_player(self.player):
-                is_anchored = True
+            if not self._is_anchored and block.anchors_player(self.player):
+                self._is_anchored = True
 
-        return is_anchored
+        return self._is_anchored
 
 
     def get_blocks_affected(self):
+        if self._blocks_affected:
+            return self._blocks_affected
+
         matrix = self.get_piece_matrix()
 
-        return [
+        self._blocks_affected = [
             self._board.get_block((x + self.x, y + self.y))
             for y in range(len(matrix))
             for x in range(len(matrix[y]))
             if matrix[y][x] == 1
         ]
+
+        return self._blocks_affected
 
 
     def get_anchors(self):
@@ -133,6 +167,7 @@ class Move:
 class Piece:
     def __init__(self, raw_piece, player):
         self.player = player
+        self.is_played = False
         self.orientations = self._init_orientations([ raw_piece ])
         self._anchors = [Piece._get_anchors_for_piece(orientation) for orientation in self.orientations]
 
@@ -215,10 +250,6 @@ class Piece:
 
     def get_size(self):
         return sum([block for block in self.orientations[0].flatten()])
-
-
-    def is_played(self):
-        return self not in self.player.unplayed_pieces
 
 
     def __str__(self):
@@ -332,7 +363,7 @@ class Player(abc.ABC):
                             anchor.position[1] - piece_anchor[1]
                         )
 
-                        move = Move(board, piece, position_offset, orientation=i)
+                        move = Move.new_move_or_get_from_cache(board, piece, position_offset, orientation=i)
                         if move.is_valid():
                             valid_moves.append(move)
 
@@ -366,6 +397,7 @@ class Player(abc.ABC):
         assert piece in self.unplayed_pieces
 
         self.unplayed_pieces.remove(piece)
+        piece.is_played = True
 
 
     def get_score(self):

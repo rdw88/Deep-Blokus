@@ -1,2 +1,6 @@
 venv/
 .vscode/
+
+__pycache__/
+boards/*.png
+!boards/sample_game.png

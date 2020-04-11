@@ -1,40 +1,33 @@
 import blokus
 import abc
 import random
-import os
+
+from timer import timer, print_results
 
 
 class Ai(abc.ABC):
-    pass
-
-
-
-'''
-Each player makes a random move on each turn but prioritizes
-playing pieces with a greater point value.
-'''
-class RandomAi(Ai):
     def __init__(self):
         self.board = blokus.Board()
         self.turn_count = 0
-        self.finished_count = 0
-        self.completed = False
+        self.players_remaining = len(self.board.players)
+        self.is_complete = False
 
 
+    @abc.abstractmethod
+    def next_move(self, player):
+        pass
+
+
+    @timer
     def play_game(self):
-        while not self.completed:
+        while not self.is_complete:
             self.next_turn()
 
-        image = self.board.get_image()
-
-        if os.path.exists('board/game.png'):
-            os.remove('boards/game.png')
-
-        image.save('boards/game.png')
+        self.board.save('boards/game.png')
 
 
     def next_turn(self):
-        if self.finished_count == 4:
+        if self.players_remaining == 0:
             self.end_game()
             return
 
@@ -44,20 +37,8 @@ class RandomAi(Ai):
         move = self.next_move(player)
         if move:
             self.board.make_move(move)
-            #image = self.board.get_image()
-            #image.save('boards/game_%s.png' % self.turn_count)
         else:
-            self.finished_count += 1
-
-
-    def next_move(self, player):
-        for i in reversed(range(1, 6)):
-            pieces = list(filter(lambda piece: piece.get_size() == i, player.unplayed_pieces))
-
-            valid_moves = player.get_valid_moves(self.board, pieces=pieces)
-
-            if len(valid_moves) > 0:
-                return valid_moves[random.randint(0, len(valid_moves) - 1)]
+            self.players_remaining -= 1
 
 
     def end_game(self):
@@ -74,13 +55,29 @@ class RandomAi(Ai):
         print('Green:', green_player.get_score())
         print('Yellow:', yellow_player.get_score())
 
-        self.completed = True
+        self.is_complete = True
 
 
     def get_turn(self):
         return self.turn_count % len(self.board.players)
 
 
+
+'''
+Each player makes a random move on each turn.
+'''
+class RandomAi(Ai):
+    def next_move(self, player):
+        valid_moves = player.get_valid_moves(self.board)
+
+        if len(valid_moves) > 0:
+            return valid_moves[random.randint(0, len(valid_moves) - 1)]
+
+
 if __name__ == '__main__':
-    ai = RandomAi()
-    ai.play_game()
+    for i in range(10):
+        ai = RandomAi()
+        ai.play_game()
+        blokus.Move._move_cache.clear()
+
+    print_results()
