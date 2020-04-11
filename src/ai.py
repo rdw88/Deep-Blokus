@@ -3,6 +3,7 @@ import abc
 import random
 
 from timer import timer, print_results
+from multiprocessing.connection import Client
 
 
 class Ai(abc.ABC):
@@ -74,10 +75,29 @@ class RandomAi(Ai):
             return valid_moves[random.randint(0, len(valid_moves) - 1)]
 
 
+class LSTMAi(Ai):
+    def __init__(self):
+        self.client = Client(('localhost', 8080))
+
+
+    def next_move(self, player):
+        pass
+
+
+    def train(self):
+        self.client.send({
+            'scores': [12, 8, 0, 21],
+            'boards': [1, 1, 1]
+        })
+
+
 if __name__ == '__main__':
-    for i in range(10):
-        ai = RandomAi()
-        ai.play_game()
-        blokus.Move._move_cache.clear()
+    ai = LSTMAi()
+    while True:
+        try:
+            ai.train()
+        except KeyboardInterrupt:
+            ai.client.close()
+            break
 
     print_results()
