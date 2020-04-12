@@ -26,17 +26,24 @@ class BlokusTrainer:
 
 
     def train(self):
-        for batch in self.next_batch():
-            print(batch)
+        try:
+            for batch in self.get_batches():
+                print(batch)
+        except:
+            self.save_models()
 
 
     '''
     Read the latest games from the queue until we have reached
     batch size.
     '''
-    def next_batch(self):
+    def get_batches(self):
         while True:
             yield batch_queue.get(timeout=30)
+
+
+    def save_models(self):
+        print('Saving models...')
 
 
 
@@ -58,10 +65,13 @@ def server_loop():
     while True:
         try:
             message = connection.recv()
+
             if not message:
-                break
+                connection = listener.accept()
+                continue
         except EOFError:
-            break
+            connection = listener.accept()
+            continue
 
         on_message_received(trainer, message)
 

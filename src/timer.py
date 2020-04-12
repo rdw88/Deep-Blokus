@@ -16,7 +16,6 @@ def timer(function):
 
         total_time = end - start
 
-        global function_timers
         if function.__name__ not in function_timers:
             function_timers[function.__name__] = list()
 
@@ -24,14 +23,10 @@ def timer(function):
 
         return result
 
-        #print(f'Execution time ({function.__name__}): {total_time} seconds')
-
     return decorator
 
 
 def print_results():
-    global function_timers
-
     print('\nExecution Metrics:')
 
     for function in function_timers.keys():

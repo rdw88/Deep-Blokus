@@ -267,10 +267,11 @@ class Piece:
 
 
 class Block:
+    DEFAULT_IMAGE = Image.open('resources/block.png')
+
     def __init__(self, position, players):
         self.position = position
         self.player = None
-        self.default_image = Image.open('resources/block.png')
         
         self._allows_player = { player: True for player in players }
         self._anchors = { player: False for player in players }
@@ -313,7 +314,7 @@ class Block:
 
 
     def get_image(self):
-        return self.player.get_image() if self.player else self.default_image
+        return self.player.get_image() if self.player else Block.DEFAULT_IMAGE
 
 
     def __str__(self):
@@ -363,7 +364,8 @@ class Player(abc.ABC):
                             anchor.position[1] - piece_anchor[1]
                         )
 
-                        move = Move.new_move_or_get_from_cache(board, piece, position_offset, orientation=i)
+                        #move = Move.new_move_or_get_from_cache(board, piece, position_offset, orientation=i)
+                        move = Move(board, piece, position_offset, orientation=i)
                         if move.is_valid():
                             valid_moves.append(move)
 

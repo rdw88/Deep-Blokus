@@ -1,6 +1,7 @@
 import blokus
 import abc
 import random
+import statistics
 
 from timer import timer, print_results
 from multiprocessing.connection import Client
@@ -86,12 +87,13 @@ class LSTMAi(Ai):
 
     def train(self):
         self.client.send({
-            'scores': [12, 8, 0, 21],
+            'scores': [random.randint(0, 100), random.randint(0, 100)],
             'boards': [1, 1, 1]
         })
 
 
 if __name__ == '__main__':
+    '''
     ai = LSTMAi()
     while True:
         try:
@@ -99,5 +101,13 @@ if __name__ == '__main__':
         except KeyboardInterrupt:
             ai.client.close()
             break
+    '''
+    turn_counts = list()
+    for i in range(1):
+        ai = RandomAi()
+        ai.play_game()
+        turn_counts.append(ai.turn_count)
+
+    print('Average turn count:', statistics.mean(turn_counts))
 
     print_results()
