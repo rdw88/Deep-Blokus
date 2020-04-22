@@ -32,8 +32,8 @@ def print_results():
     for function in function_timers.keys():
         print(f'{function}():')
         print(f'Called {len(function_timers[function])} times')
-        print(f'min: {min(function_timers[function])} seconds')
-        print(f'median: {statistics.median(function_timers[function])} seconds')
-        print(f'mean: {statistics.mean(function_timers[function])} seconds')
-        print(f'max: {max(function_timers[function])} seconds')
+        #print(f'min: {min(function_timers[function])} seconds')
+        #rint(f'median: {statistics.median(function_timers[function])} seconds')
+        #print(f'mean: {statistics.mean(function_timers[function])} seconds')
+        #print(f'max: {max(function_timers[function])} seconds')
         print(f'total: {sum(function_timers[function])} seconds')

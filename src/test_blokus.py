@@ -1,5 +1,6 @@
 from unittest import TestCase, main
 from unittest.mock import patch
+from ai import LSTMAi
 
 import blokus
 
@@ -86,22 +87,168 @@ class BoardTestCase(TestCase):
 
 
     def _verify_make_move(self, board, player, expected_assigned, expected_anchors, expected_disallowed):
-        assigned_blocks = set([block.position for row in board.board for block in row if block.player == player])
+        assigned_blocks = set([block.position for row in board.board for block in row if block.get_player() == player])
 
         self.assertEqual(assigned_blocks, expected_assigned)
 
         anchors = set([block.position for row in board.board for block in row if block.anchors_player(player)])
 
         self.assertEqual(anchors, expected_anchors)
-        self.assertEqual(anchors, set([block.position for block in player.anchors]))
+        self.assertEqual(anchors, set([block().position for block in player.anchors]))
 
         expected_disallowed = expected_disallowed.union(expected_assigned)
         disallowed = set([block.position for row in board.board for block in row if not block.allows_player(player)])
 
         self.assertEqual(disallowed, expected_disallowed)
 
-        allowed = set([block for row in board.board for block in row if block.allows_player(player)])
-        self.assertEqual(allowed, player.allowed_blocks)
+
+    def test_fake_move(self):
+        board = blokus.Board()
+        piece = blokus.Piece(np.array([
+            [1, 1, 1],
+            [1, 0, 0],
+            [1, 0, 0]
+        ]), board.players[0])
+        
+        move = blokus.Move(board, piece, (0, 0))
+
+        board.fake_move(move)
+
+        self.assertSetEqual(
+            board.faked_blocks,
+            set([
+                board.get_block((0, 0)),
+                board.get_block((1, 0)),
+                board.get_block((2, 0)),
+                board.get_block((0, 1)),
+                board.get_block((0, 2))
+            ])
+        )
+
+        for block in board.faked_blocks:
+            self.assertEqual(block.get_player(fake=True), board.players[0])
+            self.assertIsNone(block.get_player())
+
+        move = blokus.Move(board, piece, (0, 0), orientation=1)
+
+        board.fake_move(move)
+
+        self.assertSetEqual(
+            board.faked_blocks,
+            set([
+                board.get_block((0, 0)),
+                board.get_block((1, 0)),
+                board.get_block((2, 0)),
+                board.get_block((2, 1)),
+                board.get_block((2, 2))
+            ])
+        )
+
+
+    def test_get_encoded_board(self):
+        board = blokus.Board()
+        empty_block = [1, 0, 0, 0, 0]
+
+        encoded = board.get_encoded_board()
+        expected_size = len(empty_block) * (blokus.Board.SIZE ** 2)
+
+        self.assertEqual(len(encoded), expected_size)
+        
+        for i in range(0, len(encoded), len(empty_block)):
+            self.assertListEqual(encoded[i:i + len(empty_block)].tolist(), empty_block)
+
+        with patch('blokus.Block.allows_player', return_value=True):
+            test_positions = [ (12, 5), (0, 0), (19, 14), (9, 4) ]
+
+            # If we flatten the test_positions to one dimension
+            # z = 5(x + by) where b = Board Size
+            # Constant 5 comes from each block encoded using a 5 length one-hot vector
+            flattened_positions = [ 560, 0, 1495, 445 ]
+            expected_encodings = [
+                [0, 1, 0, 0, 0],
+                [0, 0, 1, 0, 0],
+                [0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 1]
+            ]
+
+            for i, position in enumerate(test_positions):
+                block = board.get_block(position)
+                block.set_player(board.players[i])
+
+            encoded = board.get_encoded_board()
+
+            for i in range(0, len(encoded), len(empty_block)):
+                block_encoding = encoded[i:i + len(empty_block)]
+
+                if i in flattened_positions:
+                    self.assertListEqual(block_encoding.tolist(), expected_encodings[flattened_positions.index(i)])
+                else:
+                    self.assertListEqual(block_encoding.tolist(), empty_block)
+
+            faked_position = (4, 18)
+            flattened_position = 1820
+
+            piece = blokus.Piece(np.array([[ 1 ]]), board.players[0])
+            move = blokus.Move(board, piece, faked_position)
+            board.fake_move(move)
+
+            encoded = board.get_encoded_board(fake=True)
+
+            for i in range(0, len(encoded), len(empty_block)):
+                block_encoding = encoded[i:i + len(empty_block)]
+
+                if i in flattened_positions:
+                    self.assertListEqual(block_encoding.tolist(), expected_encodings[flattened_positions.index(i)])
+                elif i == flattened_position:
+                    self.assertListEqual(block_encoding.tolist(), [0, 1, 0, 0, 0])
+                else:
+                    self.assertListEqual(block_encoding.tolist(), empty_block)
+
+            faked_position = (2, 14)
+            flattened_position = 1410
+
+            piece = blokus.Piece(np.array([[ 1, 1 ]]), board.players[1])
+            move = blokus.Move(board, piece, faked_position)
+            board.fake_move(move)
+
+            encoded = board.get_encoded_board(fake=True)
+
+            for i in range(0, len(encoded), len(empty_block)):
+                block_encoding = encoded[i:i + len(empty_block)]
+
+                if i in flattened_positions:
+                    self.assertListEqual(block_encoding.tolist(), expected_encodings[flattened_positions.index(i)])
+                elif i == flattened_position or i == flattened_position + 5:
+                    self.assertListEqual(block_encoding.tolist(), [0, 0, 1, 0, 0])
+                else:
+                    self.assertListEqual(block_encoding.tolist(), empty_block)
+
+            encoded = board.get_encoded_board()
+            for i in range(0, len(encoded), len(empty_block)):
+                block_encoding = encoded[i:i + len(empty_block)]
+
+                if i in flattened_positions:
+                    self.assertListEqual(block_encoding.tolist(), expected_encodings[flattened_positions.index(i)])
+                else:
+                    self.assertListEqual(block_encoding.tolist(), empty_block)
+
+
+    '''
+    The encoded board is an array of length 5 * (Board.SIZE ^ 2) since
+    each block on the board is encoded using a 5 length one-hot vector.
+
+    Index is determined by the following function:
+
+    index = 5 * (pos_x + (pos_y * board_size))
+    '''
+    def test_get_encoded_board_index(self):
+        board = blokus.Board()
+
+        self.assertEqual(board.get_encoded_board_index((0, 0)), 0)
+        self.assertEqual(board.get_encoded_board_index((4, 17)), 1720)
+        self.assertEqual(board.get_encoded_board_index((19, 1)), 195)
+        self.assertEqual(board.get_encoded_board_index((8, 15)), 1540)
+
 
 
     def test_get_block(self):
@@ -265,7 +412,7 @@ class PieceTestCase(TestCase):
         piece = blokus.Piece(raw_piece, player)
 
         self.assertEqual(piece.get_orientation_count(), 8)
-        self.assertEqual(piece.player, player)
+        self.assertEqual(piece.get_player(), player)
         self.assertEqual(len(piece._anchors), 8)
 
         rotated_once = np.array([
@@ -468,28 +615,28 @@ class PieceTestCase(TestCase):
 @patch('blokus.Player')
 class BlockTestCase(TestCase):
     def test_initialization(self, player_1, player_2):
+        board = blokus.Board()
         players = [ player_1, player_2 ]
-        block = blokus.Block((5, 3), players)
+        block = blokus.Block((5, 3), players, board)
 
         self.assertEqual(block.position, (5, 3))
-        self.assertIsNone(block.player)
+        self.assertIsNone(block.get_player())
         self.assertEqual(len(block._allows_player.keys()), 2)
         self.assertEqual(block.x, 5)
         self.assertEqual(block.y, 3)
+        self.assertEqual(block._board(), board)
 
         self.assertTrue(block._allows_player[player_1])
         self.assertTrue(block._allows_player[player_2])
         self.assertFalse(block._anchors[player_1])
         self.assertFalse(block._anchors[player_2])
 
-        for player in players:
-            player.set_block_allowed.assert_called_once_with(block, True)
-
 
     @patch('blokus.Player')
     def test_allows_player(self, player_1, player_2, player_3):
+        board = blokus.Board()
         players = [ player_1, player_2, player_3 ]
-        block = blokus.Block((4, 9), players)
+        block = blokus.Block((4, 9), players, board)
 
         self.assertTrue(all([block.allows_player(player) for player in players]))
 
@@ -499,17 +646,17 @@ class BlockTestCase(TestCase):
         self.assertTrue(block.allows_player(player_2))
         self.assertTrue(block.allows_player(player_3))
 
+        player_2.get_code.return_value = 'R'
         block.set_player(player_2)
-
-        player_2.set_block_allowed.assert_called()
 
         self.assertTrue(all([not block.allows_player(player) for player in players]))
 
 
     @patch('blokus.Player')
     def test_anchors_player(self, player_1, player_2, player_3):
+        board = blokus.Board()
         players = [ player_1, player_2, player_3 ]
-        block = blokus.Block((1, 1), players)
+        block = blokus.Block((1, 1), players, board)
 
         self.assertTrue(all([not block.anchors_player(player) for player in players]))
 
@@ -535,19 +682,46 @@ class BlockTestCase(TestCase):
         player_2.get_code.return_value = 'B'
         player_2.get_image.return_value = 'IMAGE'
 
+        board = blokus.Board()
         players = [ player_1, player_2 ]
-        block = blokus.Block((0, 0), players)
+        block = blokus.Block((0, 0), players, board)
 
-        self.assertIsNone(block.player)
+        self.assertIsNone(block.get_player())
         self.assertEqual(str(block), '0')
         
         block.set_player(player_2)
 
-        self.assertEqual(block.player, player_2)
+        self.assertEqual(block.get_player(), player_2)
         self.assertEqual(str(block), 'B')
         self.assertEqual(block.get_image(), 'IMAGE')
         self.assertFalse(block.allows_player(player_2))
         self.assertFalse(block.allows_player(player_1))
+
+
+    def test_get_player(self, player_1, player_2):
+        board = blokus.Board()
+        players = [ player_1, player_2 ]
+        block = blokus.Block((0, 0), players, board)
+
+        self.assertIsNone(block.get_player())
+
+        player_1.get_code.return_value = 'R'        
+        block.set_player(player_1)
+
+        self.assertIsNotNone(block.get_player())
+        self.assertEqual(block.get_player(), player_1)
+
+        block.set_player(player_2, fake=True)
+
+        self.assertIsNotNone(block.get_player(fake=True))
+        self.assertEqual(block.get_player(), player_1)
+        self.assertEqual(block.get_player(fake=True), player_2)
+
+        block.set_player(None, fake=True)
+
+        self.assertEqual(block.get_player(), player_1)
+        self.assertEqual(block.get_player(fake=True), player_1)
+
 
 
 class PlayerTestCase(TestCase):
@@ -555,7 +729,7 @@ class PlayerTestCase(TestCase):
         player = blokus.RedPlayer()
 
         self.assertEqual(len(player.unplayed_pieces), 21)
-        self.assertTrue(all([piece.player == player for piece in player.unplayed_pieces]))
+        self.assertTrue(all([piece.get_player() == player for piece in player.unplayed_pieces]))
 
 
     def test_get_valid_moves(self):

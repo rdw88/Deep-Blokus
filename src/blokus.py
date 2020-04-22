@@ -2,6 +2,7 @@ import json
 import numpy as np
 import abc
 import os
+import weakref
 
 from PIL import Image
 from timer import timer
@@ -9,6 +10,13 @@ from timer import timer
 
 class Board:
     SIZE = 20
+    BLOCK_ENCODINGS = {
+        'R': 1,
+        'B': 2,
+        'G': 3,
+        'Y': 4
+    }
+    ENCODED_BLOCK_SIZE = 5
 
     def __init__(self):
         self.players = [
@@ -18,12 +26,15 @@ class Board:
             YellowPlayer()
         ]
 
-        self.board = [[Block((x, y), self.players) for x in range(Board.SIZE)] for y in range(Board.SIZE)]
+        self.board = [[Block((x, y), self.players, self) for x in range(Board.SIZE)] for y in range(Board.SIZE)]
+        self._encoded_board = np.array([1, 0, 0, 0, 0] * (Board.SIZE ** 2))
 
         self.get_block((0, 0)).set_anchor(self.players[0], True)
         self.get_block((19, 0)).set_anchor(self.players[1], True)
         self.get_block((19, 19)).set_anchor(self.players[2], True)
         self.get_block((0, 19)).set_anchor(self.players[3], True)
+
+        self.faked_blocks = set()
 
 
     def make_move(self, move):
@@ -50,6 +61,62 @@ class Board:
                     adjacent_block.set_anchor(move.player, True)
 
         move.player.play_piece(move._piece)
+
+
+    def fake_move(self, move):
+        [block.set_player(None, fake=True) for block in self.faked_blocks]
+        self.faked_blocks.clear()
+        
+        for block in move.get_blocks_affected():
+            block.set_player(move.player, fake=True)
+            self.faked_blocks.add(block)
+
+
+    def set_encoded_block(self, position, player):
+        block_index = self.get_encoded_board_index(position)
+        player_encoding_offset = Board.BLOCK_ENCODINGS[player.get_code()]
+
+        self._encoded_board[block_index] = 0
+        self._encoded_board[block_index + player_encoding_offset] = 1
+
+
+    '''
+    Blokus boards for training are encoded into one large vector where every 5
+    elements within the vector represent the state of one block on the board.
+    
+    Each block on the board can have 1 of 5 states:
+        - Empty  [1, 0, 0, 0, 0]
+        - Red    [0, 1, 0, 0, 0]
+        - Blue   [0, 0, 1, 0, 0]
+        - Green  [0, 0, 0, 1, 0]
+        - Yellow [0, 0, 0, 0, 1]
+
+    Each block is encoded using a one-hot vector that represents one of the five
+    possible states and each block vector is appended onto the final vector
+    representing the board.
+
+    The size of the board vector is therefore (20 * 20 * 5) = 2000
+    '''
+    def get_encoded_board(self, fake=False):
+        if not fake or len(self.faked_blocks) == 0:
+            return self._encoded_board
+
+        faked_board = np.copy(self._encoded_board)
+        for block in self.faked_blocks:
+            index = self.get_encoded_board_index(block.position)
+            player_encoding_offset = Board.BLOCK_ENCODINGS[block.get_player(fake=True).get_code()]
+
+            faked_board[index] = 0
+            faked_board[index + player_encoding_offset] = 1
+
+        return faked_board
+
+
+    def get_encoded_board_index(self, position):
+        x = position[0]
+        y = position[1]
+
+        return Board.ENCODED_BLOCK_SIZE * (x + (y * Board.SIZE))
 
 
     def get_block(self, position):
@@ -113,7 +180,6 @@ class Move:
         return self._piece.orientations[self._orientation]
 
 
-    @timer
     def is_valid(self):
         if self._piece.is_played:
             return False
@@ -160,13 +226,13 @@ class Move:
 
     @property
     def player(self):
-        return self._piece.player
+        return self._piece.get_player()
 
 
 
 class Piece:
     def __init__(self, raw_piece, player):
-        self.player = player
+        self.player = weakref.ref(player)
         self.is_played = False
         self.orientations = self._init_orientations([ raw_piece ])
         self._anchors = [Piece._get_anchors_for_piece(orientation) for orientation in self.orientations]
@@ -249,7 +315,11 @@ class Piece:
 
 
     def get_size(self):
-        return sum([block for block in self.orientations[0].flatten()])
+        return sum([int(block) for block in self.orientations[0].flatten()])
+
+
+    def get_player(self):
+        return self.player()
 
 
     def __str__(self):
@@ -258,7 +328,7 @@ class Piece:
 
         for y in range(len(piece)):
             for x in range(len(piece[y])):
-                piece_string += self.player.get_code() if piece[y][x] == 1 else '0'
+                piece_string += self.get_player().get_code() if piece[y][x] == 1 else '0'
 
             piece_string += '\n'
 
@@ -269,15 +339,14 @@ class Piece:
 class Block:
     DEFAULT_IMAGE = Image.open('resources/block.png')
 
-    def __init__(self, position, players):
+    def __init__(self, position, players, board):
         self.position = position
-        self.player = None
+        self._player = None
+        self._faked_player = None
+        self._board = weakref.ref(board)
         
         self._allows_player = { player: True for player in players }
         self._anchors = { player: False for player in players }
-
-        for player in players:
-            player.set_block_allowed(self, True)
 
 
     def disallow_player(self, player):
@@ -286,11 +355,10 @@ class Block:
 
         self.set_anchor(player, False)
         self._allows_player[player] = False
-        player.set_block_allowed(self, False)
 
 
     def allows_player(self, player):
-        return not self.player and self._allows_player[player]
+        return not self._player and self._allows_player[player]
 
 
     def set_anchor(self, player, anchor):
@@ -302,23 +370,32 @@ class Block:
 
 
     def anchors_player(self, player):
-        return not self.player and self._anchors[player]
+        return not self._player and self._anchors[player]
 
 
-    def set_player(self, player):
+    def set_player(self, player, fake=False):
+        if fake:
+            self._faked_player = player
+            return
+
         if not self.allows_player(player):
             raise RuntimeError(f'Player not allowed on block {self.position}!')
 
         self.disallow_player(player)
-        self.player = player
+        self._player = player
+        self._board().set_encoded_block(self.position, player)
+
+
+    def get_player(self, fake=False):
+        return self._faked_player if fake and self._faked_player else self._player
 
 
     def get_image(self):
-        return self.player.get_image() if self.player else Block.DEFAULT_IMAGE
+        return self._player.get_image() if self._player else Block.DEFAULT_IMAGE
 
 
     def __str__(self):
-        return self.player.get_code() if self.player else '0'
+        return self._player.get_code() if self._player else '0'
 
 
     @property
@@ -333,10 +410,11 @@ class Block:
 
 class Player(abc.ABC):
     def __init__(self):
-        self.unplayed_pieces = Piece.get_all_pieces(self)
-        self.allowed_blocks = set()
+        self.unplayed_pieces = Piece.get_all_pieces(self)   
         self.anchors = set()
         self._image = None
+        self._used_one_piece_last = False
+
 
 
     @abc.abstractmethod
@@ -360,12 +438,11 @@ class Player(abc.ABC):
                 for i in range(piece.get_orientation_count()):
                     for piece_anchor in piece.get_anchors(orientation=i):
                         position_offset = (
-                            anchor.position[0] - piece_anchor[0],
-                            anchor.position[1] - piece_anchor[1]
+                            anchor().position[0] - piece_anchor[0],
+                            anchor().position[1] - piece_anchor[1]
                         )
 
-                        #move = Move.new_move_or_get_from_cache(board, piece, position_offset, orientation=i)
-                        move = Move(board, piece, position_offset, orientation=i)
+                        move = Move.new_move_or_get_from_cache(board, piece, position_offset, orientation=i)
                         if move.is_valid():
                             valid_moves.append(move)
 
@@ -379,31 +456,33 @@ class Player(abc.ABC):
         return self._image
 
 
-    def set_block_allowed(self, block, is_allowed):
-        if is_allowed:
-            self.allowed_blocks.add(block)
-        elif block in self.allowed_blocks:
-            self.allowed_blocks.remove(block)
-            self.set_anchor(block, False)
-
-
     def set_anchor(self, block, is_anchor):
-        if is_anchor:
-            self.anchors.add(block)
-        elif block in self.anchors:
-            self.anchors.remove(block)
+        existing_anchor = [anchor for anchor in self.anchors if anchor() == block]
+
+        if is_anchor and len(existing_anchor) == 0:
+            self.anchors.add(weakref.ref(block))
+
+        if not is_anchor and len(existing_anchor) == 1:
+            self.anchors.remove(existing_anchor[0])
 
 
     def play_piece(self, piece):
-        assert piece.player == self
+        assert piece.get_player() == self
         assert piece in self.unplayed_pieces
 
         self.unplayed_pieces.remove(piece)
         piece.is_played = True
 
+        if len(self.unplayed_pieces) == 0 and piece.get_size() == 1:
+            self._used_one_piece_last = True
+
 
     def get_score(self):
-        return sum([piece.get_size() for piece in self.unplayed_pieces])
+        score = sum([piece.get_size() for piece in self.unplayed_pieces])
+        if self._used_one_piece_last:
+            score -= 10
+
+        return score
 
 
 class RedPlayer(Player):
