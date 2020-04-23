@@ -132,7 +132,7 @@ class BlokusTrainer:
         self.batch_size = batch_size
         self.num_steps = num_steps
         self.num_epochs = num_epochs
-        self.validation_data = self._init_validation_data(validate_path)
+        self.validation_data = self._init_validation_data(validate_path) if validate_path else None
 
         self.model = models.blokus_model()
 

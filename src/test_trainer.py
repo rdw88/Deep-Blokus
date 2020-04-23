@@ -8,18 +8,19 @@ class BlokusTrainerTestCase(TestCase):
             output_file='models/test_model.h5',
             batch_size=100,
             num_steps=64,
-            num_workers=4
+            num_epochs=5,
+            validate_path=None
         )
 
         self.assertEqual(trainer.output_file, 'models/test_model.h5')
         self.assertEqual(trainer.batch_size, 100)
         self.assertEqual(trainer.num_steps, 64)
-        self.assertEqual(len(trainer.workers), 4)
+        self.assertEqual(trainer.num_epochs, 5)
+        self.assertIsNone(trainer.validation_data)
 
         self.assertIsNotNone(trainer.model)
         self.assertIsNotNone(trainer.game_queue)
-        self.assertIsNotNone(trainer.training_complete_event)
-        self.assertFalse(trainer.training_complete_event.is_set())
+        self.assertFalse(trainer.training_complete)
 
         with self.assertRaises(ValueError):
             BlokusTrainer(output_file='models/not_h5_file.txt')

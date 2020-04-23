@@ -1,6 +1,5 @@
 from unittest import TestCase, main
 from unittest.mock import patch, MagicMock
-from multiprocessing import Event, Queue
 
 import blokus
 import ai
@@ -226,14 +225,11 @@ class LSTMAiTestCase(TestCase):
         
         self.assertFalse(lstm_ai.is_training())
 
-        event = Event()
-        event.set()
-
-        lstm_ai.train(Queue(), event)
+        lstm_ai._training = False
 
         self.assertFalse(lstm_ai.is_training())
 
-        event.clear()
+        lstm_ai._training = True
 
         self.assertTrue(lstm_ai.is_training())
 
