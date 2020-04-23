@@ -120,7 +120,7 @@ class BlokusTrainer:
     # Number of games 
     MODEL_UPDATE_FREQUENCY = 100
 
-    def __init__(self, output_file, batch_size=5, num_steps=32, num_epochs=1, validate_path=None):
+    def __init__(self, output_file, batch_size=5, num_steps=32, num_epochs=1, validate_path=None, metrics_path_override=None):
         if not output_file:
             print('WARNING: No output file for model!')
 
@@ -133,6 +133,7 @@ class BlokusTrainer:
         self.num_steps = num_steps
         self.num_epochs = num_epochs
         self.validation_data = self._init_validation_data(validate_path) if validate_path else None
+        self.metrics_path_override = metrics_path_override
 
         self.model = models.blokus_model()
 
@@ -192,6 +193,9 @@ class BlokusTrainer:
 
     def train(self):
         training_metrics_path = f'metrics/{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}'.replace('/', os.sep)
+        if self.metrics_path_override:
+            training_metrics_path = self.metrics_path_override.replace('/', os.sep).replace('\\', os.sep)
+
         Path(training_metrics_path).mkdir(parents=True, exist_ok=True)
         
         tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=training_metrics_path)
@@ -267,31 +271,33 @@ class BlokusTrainer:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('Train a model for Blokus')
-    parser.add_argument('-o', action='store', required=True, help='The output file of the resulting model.')
+    parser.add_argument('-o', action='store', required=True, help='The output file of the resulting model.', dest='output_path')
     parser.add_argument('--batch-size', action='store', type=int, required=True, help='The batch size of the model.')
     parser.add_argument('--steps', action='store', type=int, required=True, help='The number of training examples per epoch.')
     parser.add_argument('--epochs', action='store', type=int, required=True, help='The number of epochs of training.')
     parser.add_argument('--validate', action='store', help='A path to a JSON file containing data to validate the performance of the model on.')
+    parser.add_argument('--metrics', action='store', help='A directory name to store training metrics.')
 
     args = parser.parse_args()
 
-    if not os.path.exists(os.path.dirname(args.o)):
+    if not os.path.exists(os.path.dirname(args.output_path)):
         print('Output directory does not exist!')
         sys.exit(1)
 
-    if os.path.exists(args.o):
-        answer = input(f'The file {args.o} already exists and will be replaced. Do you want to continue? [y/n]')
+    if os.path.exists(args.output_path):
+        answer = input(f'The file {args.output_path} already exists and will be replaced. Do you want to continue? [y/n]')
         if answer.lower().strip() != 'y':
             sys.exit(1)
         
-        os.remove(args.o)
+        os.remove(args.output_path)
 
     trainer = BlokusTrainer(
-        output_file=args.o,
+        output_file=args.output_path,
         batch_size=args.batch_size,
         num_steps=args.steps,
         num_epochs=args.epochs,
-        validate_path=args.validate
+        validate_path=args.validate,
+        metrics_path_override=args.metrics
     )
 
     trainer.train()
