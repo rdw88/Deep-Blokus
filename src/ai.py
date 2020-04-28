@@ -99,13 +99,9 @@ class RandomAi(Ai):
 
 
 class LSTMAi(Ai):
-    def __init__(self):
+    def __init__(self, model_path=None):
         super().__init__()
-        self.model = models.blokus_model()
-        self.epsilon = 1.0
-
-        # WARNING: Changing this impacts max_value calculated in get_target()
-        self.discount_factor = 0.9
+        self.model = tf.keras.models.load_model(model_path) if model_path else models.blokus_model()
 
 
     def reinitialize(self):
@@ -116,6 +112,10 @@ class LSTMAi(Ai):
 
 
     def next_move(self, player):
+        return self.next_training_move(player) if self.is_training() else self.next_play_move(player)
+
+
+    def next_training_move(self, player):
         valid_moves = player.get_valid_moves(self.board)
         if len(valid_moves) == 0:
             if self.get_turn() == 0 and player not in self.finished_players:
@@ -148,6 +148,19 @@ class LSTMAi(Ai):
         return move
 
 
+    def next_play_move(self, player):
+        valid_moves = player.get_valid_moves(self.board)
+        if len(valid_moves) == 0:
+            return None
+
+        if self.get_turn() > 0:
+            return valid_moves[random.randint(0, len(valid_moves) - 1)]
+
+        max_q_value_index = np.argmax([prediction[0] for prediction in self.get_predictions(valid_moves)])
+
+        return valid_moves[max_q_value_index]
+
+
     def get_predictions(self, valid_moves):
         return self.model(
             self.get_encoded_valid_moves(valid_moves)
@@ -173,6 +186,9 @@ class LSTMAi(Ai):
     def train(self, trainer_client):
         self._training = True
         self._trainer_client = trainer_client
+        self.epsilon = 1.0
+        # WARNING: Changing this impacts max_value calculated in get_target()
+        self.discount_factor = 0.9
 
         self.update_model()
         self.play_games()
@@ -242,8 +258,8 @@ class LSTMAi(Ai):
 
 
 def start_worker(trainer_address, trainer_port):
-    sys.stdout = open(f'logs/worker_log_{os.getpid()}.out', 'a')
-    sys.stderr = open(f'logs/worker_error_{os.getpid()}.out', 'a')
+    sys.stdout = open(f'logs/worker_log_{os.getpid()}.out', 'a', buffering=1)
+    sys.stderr = open(f'logs/worker_error_{os.getpid()}.out', 'a', buffering=1)
 
     client = TrainerClient(trainer_address, trainer_port)
     client.connect()
@@ -254,21 +270,15 @@ def start_worker(trainer_address, trainer_port):
         print(traceback.format_exc(), flush=True, file=sys.stderr)
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser('Run worker processes that play games of Blokus for a trainer.')
-    parser.add_argument('--address', action='store', required=True, help='The IP address of the trainer.')
-    parser.add_argument('--port', action='store', type=int, required=True, help='The port number the trainer is running on.')
-    parser.add_argument('--num-workers', action='store', type=int, help='The number of worker processes. Defaults to os.cpu_count()')
-
-    args = parser.parse_args()
+def init_training(args):
+    if not args.address or not args.port:
+        raise ValueError('Trainer IP Address and Port is required to train!')
 
     num_workers = args.num_workers if args.num_workers else os.cpu_count()
 
     existing_logs = [file_name for file_name in os.listdir('logs/') if os.path.splitext(file_name)[1] == '.out']
     for existing_log in existing_logs:
         os.remove(f'logs/{existing_log}')
-
-    #start_worker(args.address, args.port)
 
     print(f'Initializing pool of {num_workers} workers... ', end='')
 
@@ -285,3 +295,42 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         pool.terminate()
         pool.join()
+
+
+def init_play(args):
+    if not args.model:
+        raise ValueError('Specify a model to play with')
+
+    if not os.path.exists(args.model):
+        raise ValueError(f'Model at path {args.model} does not exist!')
+
+    print('Playing a game of Blokus...')
+
+    ai = LSTMAi(args.model)
+    ai.play_game()
+
+    print('Results:')
+    print('Red:', ai.board.players[0].get_score())
+    print('Blue:', ai.board.players[1].get_score())
+    print('Green:', ai.board.players[2].get_score())
+    print('Yellow:', ai.board.players[3].get_score())
+
+    save_path = 'boards/game.png'
+    ai.board.save(save_path)
+    print(f'Game saved at {save_path}')
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser('Run worker processes that play games of Blokus for a trainer.')
+    parser.add_argument('action', action='store', choices=('train', 'play'), help='Specify an action to perform.')
+    parser.add_argument('--model', action='store', help='The model to use for playing.')
+    parser.add_argument('--address', action='store', help='The IP address of the trainer.')
+    parser.add_argument('--port', action='store', type=int, help='The port number the trainer is running on.')
+    parser.add_argument('--num-workers', action='store', type=int, help='The number of worker processes. Defaults to os.cpu_count()')
+
+    args = parser.parse_args()
+
+    if args.action == 'train':
+        init_training(args)
+    elif args.action == 'play':
+        init_play(args)

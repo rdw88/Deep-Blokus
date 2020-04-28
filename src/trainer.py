@@ -17,6 +17,7 @@ from socketserver import ThreadingTCPServer, StreamRequestHandler
 
 from threading import Thread, Event, Condition, Lock
 from pathlib import Path
+from shutil import copyfile
 
 
 
@@ -82,12 +83,20 @@ class BlokusGameRequestHandler(StreamRequestHandler):
 
 
     def send_model_to_client(self):
-        with open(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH, 'rb') as f:
-            self.wfile.write(
-                struct.pack('i', os.path.getsize(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH)) + f.read()
-            )
+        if self.server.trainer.is_local:
+            abs_path = os.path.abspath(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH)
+            encoded_path = bytes(abs_path, encoding='utf-8')
 
-            f.close()
+            self.wfile.write(
+                struct.pack('i', len(encoded_path)) + encoded_path
+            )
+        else:
+            with open(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH, 'rb') as f:
+                self.wfile.write(
+                    struct.pack('i', os.path.getsize(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH)) + f.read()
+                )
+
+                f.close()
 
 
     def on_epoch_end(self):
@@ -99,6 +108,7 @@ class TrainerClient:
     def __init__(self, server_address, server_port):
         self.address = server_address
         self.port = server_port
+        self.is_local = server_address in ('127.0.0.1', 'localhost')
 
         self.connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.remote_model_path = f'models/remote_model_{os.getpid()}.h5'
@@ -113,8 +123,14 @@ class TrainerClient:
         if os.path.exists(self.remote_model_path):
             os.remove(self.remote_model_path)
 
-        with open(self.remote_model_path, 'wb') as f:
-            f.write(raw_response)
+        if self.is_local:
+            if os.path.exists(raw_response):
+                copyfile(raw_response, self.remote_model_path)
+            else:
+                print(f'WARNING: Path to new model does not exist! {raw_response}')
+        else:
+            with open(self.remote_model_path, 'wb') as f:
+                f.write(raw_response)
 
         print('Received updated model')
 
@@ -141,8 +157,6 @@ class TrainerClient:
 
 
     def _get_response(self):
-        response = bytes()
-        
         raw_content_length = self.connection.recv(4)
         if not raw_content_length:
             return None
@@ -157,10 +171,11 @@ class TrainerClient:
         if content_length == 0:
             return None
 
+        response = bytes()
         while len(response) < content_length:
-            response += self.connection.recv(65536)
+            response += self.connection.recv(4096)
 
-        return response
+        return response.decode('utf-8') if self.is_local else response
 
 
 
@@ -226,7 +241,7 @@ class ExperienceReplayBuffer:
 class BlokusTrainer:
     MODEL_SYNC_OUTPUT_PATH = 'models/training_model.h5'
 
-    def __init__(self, output_file, batch_size=5, num_steps=32, num_epochs=1, experience_size=16, validate_path=None, metrics_path_override=None):
+    def __init__(self, output_file, batch_size=5, num_steps=32, num_epochs=1, experience_size=16, validate_path=None, metrics_path_override=None, is_local=False):
         if not output_file:
             print('WARNING: No output file for model!')
 
@@ -240,6 +255,7 @@ class BlokusTrainer:
         self.num_epochs = num_epochs
         self.validation_data = self._init_validation_data(validate_path) if validate_path else None
         self.metrics_path_override = metrics_path_override
+        self.is_local = is_local
 
         self.model = models.blokus_model()
         self.model.save(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH)
@@ -350,6 +366,8 @@ class BlokusTrainer:
 
 class BlokusTrainerCallback(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
+        print('Model md5 digest:', model_digest(self.model))
+
         self.model.save(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH)
 
         for client in BlokusGameRequestHandler.WORKER_CONNECTIONS:
@@ -366,6 +384,7 @@ if __name__ == '__main__':
     parser.add_argument('--experience', action='store', type=int, required=True, help='The size of the experience buffer.')
     parser.add_argument('--validate', action='store', help='A path to a JSON file containing data to validate the performance of the model on.')
     parser.add_argument('--metrics', action='store', help='A directory name to store training metrics.')
+    parser.add_argument('--local', action='store_true', help='Specify this flag if the workers are running locally')
 
     args = parser.parse_args()
 
@@ -387,7 +406,8 @@ if __name__ == '__main__':
         num_epochs=args.epochs,
         experience_size=args.experience,
         validate_path=args.validate,
-        metrics_path_override=args.metrics
+        metrics_path_override=args.metrics,
+        is_local=args.local
     )
 
     trainer.train()
