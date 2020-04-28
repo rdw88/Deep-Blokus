@@ -285,15 +285,11 @@ class BlokusTrainer:
         outputs = list()
 
         for example in data:
-            if 'boards' not in example or 'rewards' not in example:
+            if not isinstance(example, list) or len(example) != 2:
                 raise ValueError(f'Invalid game data in file {validate_path}')
 
-            moves = example['boards']
-            rewards = self.get_target(example['rewards'])
-
-            for move in moves:
-                inputs.append(np.array(move))
-                outputs.append(np.array(rewards))
+            inputs.append(example[0])
+            outputs.append([example[1]])
 
         print('done')
 
