@@ -9,18 +9,31 @@ import struct
 import socket
 import models
 import datetime
+import random
+import hashlib
+import statistics
 
 from socketserver import ThreadingTCPServer, StreamRequestHandler
 
-from multiprocessing import Process, Queue, Event
-from threading import Thread
+from threading import Thread, Event, Condition, Lock
 from pathlib import Path
 
-from ai import LSTMAi
+
+
+def model_digest(model):
+    digest = hashlib.md5()
+
+    for tensor in model.get_weights():
+        for element in tensor.flatten():
+            digest.update(element)
+
+    return digest.hexdigest()
 
 
 
 class BlokusGameRequestHandler(StreamRequestHandler):
+    WORKER_CONNECTIONS = list()
+
     '''
     Handle a single connection from a worker thread playing Blokus games.
     The connection will remain open indefinitely until the trainer is done training,
@@ -30,18 +43,17 @@ class BlokusGameRequestHandler(StreamRequestHandler):
     for future games.
     '''
     def handle(self):
-        print('Connection to new worker established')
+        BlokusGameRequestHandler.WORKER_CONNECTIONS.append(self)
+        self.epoch_end_event = Event()
 
-        games_received = 0
+        print('Connection to new worker established')
         trainer = self.server.trainer
+
+        self.send_model_to_client()
 
         while True:
             try:
                 raw_data = self.rfile.readline()
-
-                if trainer.training_complete:
-                    break
-
                 data = json.loads(raw_data)
             except json.JSONDecodeError:
                 if raw_data == b'':
@@ -50,32 +62,61 @@ class BlokusGameRequestHandler(StreamRequestHandler):
                 print(f'Invalid JSON in request: {raw_data}')
                 continue
 
-            if 'boards' not in data or 'scores' not in data:
-                print('Invalid request, could not find boards or scores in request!')
+            if trainer.training_complete:
+                self.wfile.write(bytes(struct.pack('i', -1)))
+                break
+
+            if 'boards' not in data or 'targets' not in data:
+                print('Invalid request, could not find boards or targets in request!')
                 continue
 
-            trainer.enqueue_game(data['boards'], data['scores'])
+            buffer_full = trainer.enqueue_game(data['boards'], data['targets'])
+            if buffer_full:
+                self.epoch_end_event.wait()
 
-            games_received += 1
-
-            if games_received % BlokusTrainer.MODEL_UPDATE_FREQUENCY == 0:
-                model_path = f'models/training_model_{int(games_received / BlokusTrainer.MODEL_UPDATE_FREQUENCY)}.h5'
-
-                trainer.model.save(model_path)
-
-                with open(model_path, 'rb') as f:
-                    data = struct.pack('i', os.path.getsize(model_path)) + f.read()
-                    self.wfile.write(data)
-                    f.close()
+            if self.epoch_end_event.is_set():
+                self.epoch_end_event.clear()
+                self.send_model_to_client()
             else:
                 self.wfile.write(bytes(struct.pack('i', 0)))
 
 
+    def send_model_to_client(self):
+        with open(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH, 'rb') as f:
+            self.wfile.write(
+                struct.pack('i', os.path.getsize(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH)) + f.read()
+            )
+
+            f.close()
+
+
+    def on_epoch_end(self):
+        self.epoch_end_event.set()
+
+
+
 class TrainerClient:
     def __init__(self, server_address, server_port):
+        self.address = server_address
+        self.port = server_port
+
         self.connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.connection.connect((server_address, server_port))
-        self.remote_model_path = 'models/remote_model.h5'
+        self.remote_model_path = f'models/remote_model_{os.getpid()}.h5'
+
+
+    def connect(self):
+        self.connection.connect((self.address, self.port))
+        self._download_model(self._get_response())
+
+
+    def _download_model(self, raw_response):
+        if os.path.exists(self.remote_model_path):
+            os.remove(self.remote_model_path)
+
+        with open(self.remote_model_path, 'wb') as f:
+            f.write(raw_response)
+
+        print('Received updated model')
 
 
     '''
@@ -83,10 +124,10 @@ class TrainerClient:
     
     Returns true if a new model is available to use from the trainer, false otherwise.
     '''
-    def send_training_example(self, boards, scores):
+    def send_training_example(self, boards, targets):
         serialized_game = json.dumps({
             'boards': boards,
-            'scores': scores
+            'targets': targets
         }) + '\n'
 
         self.connection.sendall(bytes(serialized_game, 'utf-8'))
@@ -95,16 +136,23 @@ class TrainerClient:
         if not response:
             return False
 
-        with open(self.remote_model_path, 'wb') as f:
-            f.write(response)
-
-        print('Received updated model')
+        self._download_model(response)
         return True
 
 
     def _get_response(self):
         response = bytes()
-        content_length = struct.unpack('i', self.connection.recv(4))[0]
+        
+        raw_content_length = self.connection.recv(4)
+        if not raw_content_length:
+            return None
+
+        content_length = struct.unpack('i', raw_content_length)[0]
+
+        if content_length == -1:
+            print('Training complete, shutting down worker.')
+            self.connection.close()
+            sys.exit(0)
 
         if content_length == 0:
             return None
@@ -116,11 +164,69 @@ class TrainerClient:
 
 
 
-class BlokusTrainer:
-    # Number of games 
-    MODEL_UPDATE_FREQUENCY = 100
+class ExperienceReplayBuffer:
+    def __init__(self, *, batch_size, num_entries, num_steps):
+        self.num_entries = num_entries
+        self.num_steps = num_steps
+        self.batch_size = batch_size
 
-    def __init__(self, output_file, batch_size=5, num_steps=32, num_epochs=1, validate_path=None, metrics_path_override=None):
+        self.buffer = list()
+        self.steps_returned = 0
+
+        self.buffer_full = Condition()
+        self.buffer_add_lock = Lock()
+
+
+    def add(self, board, target):
+        with self.buffer_add_lock:
+            with self.buffer_full:
+                if self.is_full():
+                    return True
+
+                self.buffer.append((board, target))
+
+                print(f'\rExperience received: {len(self.buffer)}/{self.num_entries}', end='')
+                
+                if self.is_full():
+                    self.buffer_full.notify_all()
+                    return True
+
+                return False
+
+
+    def get(self):
+        with self.buffer_full:
+            while not self.is_full():
+                self.buffer_full.wait()
+                print('Average:', statistics.mean([choice[1][0] for choice in self.buffer]))
+
+        choices = random.choices(self.buffer, k=self.batch_size)
+
+        inputs = list()
+        outputs = list()
+
+        for choice in choices:
+            inputs.append(choice[0])
+            outputs.append(choice[1])
+
+        self.steps_returned += 1
+
+        if self.steps_returned == self.num_steps:
+            self.buffer.clear()
+            self.steps_returned = 0
+
+        return (np.array(inputs), np.array(outputs))
+
+
+    def is_full(self):
+        return len(self.buffer) == self.num_entries
+
+
+
+class BlokusTrainer:
+    MODEL_SYNC_OUTPUT_PATH = 'models/training_model.h5'
+
+    def __init__(self, output_file, batch_size=5, num_steps=32, num_epochs=1, experience_size=16, validate_path=None, metrics_path_override=None):
         if not output_file:
             print('WARNING: No output file for model!')
 
@@ -136,8 +242,11 @@ class BlokusTrainer:
         self.metrics_path_override = metrics_path_override
 
         self.model = models.blokus_model()
+        self.model.save(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH)
+        print('Model md5 digest:', model_digest(self.model))
 
-        self.game_queue = Queue()
+        self.experience_replay = ExperienceReplayBuffer(batch_size=batch_size, num_entries=experience_size, num_steps=num_steps)
+
         self.server = None
         self.training_complete = False
 
@@ -147,7 +256,7 @@ class BlokusTrainer:
 
 
     def _start_server(self):
-        host, port = 'localhost', 8888
+        host, port = '0.0.0.0', 8888
 
         with ThreadingTCPServer((host, port), BlokusGameRequestHandler) as server:
             self.server = server
@@ -176,15 +285,15 @@ class BlokusTrainer:
         outputs = list()
 
         for example in data:
-            if 'boards' not in example or 'scores' not in example:
+            if 'boards' not in example or 'rewards' not in example:
                 raise ValueError(f'Invalid game data in file {validate_path}')
 
             moves = example['boards']
-            scores = self.get_target(example['scores'])
+            rewards = self.get_target(example['rewards'])
 
             for move in moves:
                 inputs.append(np.array(move))
-                outputs.append(np.array(scores))
+                outputs.append(np.array(rewards))
 
         print('done')
 
@@ -206,7 +315,7 @@ class BlokusTrainer:
                 steps_per_epoch=self.num_steps,
                 epochs=self.num_epochs,
                 validation_data=self.validation_data,
-                callbacks=[tensorboard_callback]
+                callbacks=[tensorboard_callback, BlokusTrainerCallback()]
             )
         except Exception as e:
             print(traceback.format_exc())
@@ -223,11 +332,13 @@ class BlokusTrainer:
                 print('Server shutdown')
 
 
-    def enqueue_game(self, boards, scores):
-        self.game_queue.put({
-            'boards': boards,
-            'scores': scores
-        })
+    def enqueue_game(self, boards, targets):
+        for board, target in zip(boards, targets):
+            buffer_full = self.experience_replay.add(board, np.array([target]))
+            if buffer_full:
+                return True
+
+        return False
 
 
     '''
@@ -236,36 +347,17 @@ class BlokusTrainer:
     batch size is based on number of moves.
     '''
     def get_batches(self):
-        inputs = list()
-        outputs = list()
-
         while True:
-            game = self.game_queue.get()
-
-            target = self.get_target(game['scores'])
-            boards = game['boards']
-
-            examples_needed = self.batch_size - len(inputs)
-
-            new_inputs = boards[:examples_needed]
-            inputs += new_inputs
-            outputs += ([ target ] * len(new_inputs))
-
-            while len(inputs) == self.batch_size:
-                yield (np.array(inputs), np.array(outputs))
-
-                remaining_inputs = boards[examples_needed:]
-
-                inputs = remaining_inputs[:self.batch_size]
-                outputs = [ target ] * len(inputs)
-
-                if len(remaining_inputs) >= self.batch_size:
-                    examples_needed += self.batch_size
+            yield self.experience_replay.get()
 
 
-    def get_target(self, scores):
-        min_score = min(scores)
-        return [int(score == min_score) for score in scores]
+
+class BlokusTrainerCallback(tf.keras.callbacks.Callback):
+    def on_epoch_end(self, epoch, logs=None):
+        self.model.save(BlokusTrainer.MODEL_SYNC_OUTPUT_PATH)
+
+        for client in BlokusGameRequestHandler.WORKER_CONNECTIONS:
+            client.on_epoch_end()
 
 
 
@@ -275,6 +367,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', action='store', type=int, required=True, help='The batch size of the model.')
     parser.add_argument('--steps', action='store', type=int, required=True, help='The number of training examples per epoch.')
     parser.add_argument('--epochs', action='store', type=int, required=True, help='The number of epochs of training.')
+    parser.add_argument('--experience', action='store', type=int, required=True, help='The size of the experience buffer.')
     parser.add_argument('--validate', action='store', help='A path to a JSON file containing data to validate the performance of the model on.')
     parser.add_argument('--metrics', action='store', help='A directory name to store training metrics.')
 
@@ -296,6 +389,7 @@ if __name__ == '__main__':
         batch_size=args.batch_size,
         num_steps=args.steps,
         num_epochs=args.epochs,
+        experience_size=args.experience,
         validate_path=args.validate,
         metrics_path_override=args.metrics
     )

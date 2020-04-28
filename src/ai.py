@@ -19,11 +19,14 @@ import struct
 import sys
 import traceback
 import models
+import math
 
 from threading import Thread
 from timer import timer, print_results
 
 from multiprocessing import Process, Pool
+
+from trainer import model_digest, TrainerClient
 
 
 class Ai(abc.ABC):
@@ -99,31 +102,50 @@ class LSTMAi(Ai):
     def __init__(self):
         super().__init__()
         self.model = models.blokus_model()
+        self.epsilon = 1.0
+
+        # WARNING: Changing this impacts max_value calculated in get_target()
+        self.discount_factor = 0.9
 
 
     def reinitialize(self):
         super().reinitialize()
         self.encoded_boards = list()
+        self.targets = list()
+        self.previous_reward = 0.0
 
 
     def next_move(self, player):
-        if self.turn_count > 0:
-            self.encoded_boards.append(self.board.get_encoded_board().tolist())
-
         valid_moves = player.get_valid_moves(self.board)
         if len(valid_moves) == 0:
+            if self.get_turn() == 0 and player not in self.finished_players:
+                self.targets.append(self.previous_reward)
+
             return None
 
-        return valid_moves[random.randint(0, len(valid_moves) - 1)]
+        # Lets just train for one player for now, all other players
+        # play randomly. We should see the trained player win all games eventually
+        if self.get_turn() > 0:
+            return valid_moves[random.randint(0, len(valid_moves) - 1)]
 
-        # TODO: Playing live with updated model
-        '''
-        valid_move_values = self.get_predictions_for_turn(
-            self.get_predictions(valid_moves)
-        )
+        valid_move_values = [prediction[0] for prediction in self.get_predictions(valid_moves)]
+        max_q_value_index = np.argmax(valid_move_values)
 
-        return valid_moves[np.argmax(valid_move_values)]
-        '''
+        if self.turn_count > 0:
+            self.targets.append(self.get_target(valid_move_values[max_q_value_index]))
+
+        if random.random() < self.epsilon:
+            next_move_index = random.randint(0, len(valid_moves) - 1)
+        else:
+            next_move_index = max_q_value_index
+
+        move = valid_moves[next_move_index]
+        
+        self.board.fake_move(move)
+        self.encoded_boards.append(self.board.get_encoded_board(fake=True).tolist())
+        self.previous_reward = self.get_reward(move)
+
+        return move
 
 
     def get_predictions(self, valid_moves):
@@ -152,11 +174,51 @@ class LSTMAi(Ai):
         self._training = True
         self._trainer_client = trainer_client
 
+        self.update_model()
         self.play_games()
 
 
     def is_training(self):
         return hasattr(self, '_training') and self._training
+
+
+    def get_reward(self, move):
+        current_score = move.player.get_score() - move._piece.get_size()
+        enemy_scores = sum([player.get_score() for player in self.board.players if player != move.player])
+
+        average_enemy_score = enemy_scores / 3.0
+
+        reward = (89 - current_score) - (89 - average_enemy_score)
+
+        # Max reward: 99
+        #   current_score = -10
+        #   average_enemy_score = 89
+        # Min reward: -99
+        #   current_score = 89
+        #   average_enemy_score = -10
+        # Range: [-99, 99]
+
+        # Normalize between [0, 1]
+        normalized_reward = (reward + 99) / 198.0
+        return normalized_reward
+
+
+    def get_target(self, max_q_value):
+        # TODO: Calculated this manually, may want to code this in
+        max_value = 6.35
+
+        target = self.previous_reward + (self.discount_factor * max_q_value)
+
+        return target / max_value
+
+
+    def update_model(self):
+        del self.model
+        self.model = tf.keras.models.load_model(self._trainer_client.remote_model_path)
+
+        print('Epsilon:', self.epsilon)
+        print('Discount:', self.discount_factor)
+        print('New model md5 digest:', model_digest(self.model))
 
 
     def end_game(self):
@@ -165,16 +227,17 @@ class LSTMAi(Ai):
         if not self.is_training():
             return
 
-        scores = [player.get_score() for player in self.board.players]
+        if len(self.encoded_boards) != len(self.targets):
+            raise ValueError('Number of inputs != number of outputs for training data!')
 
-        # We will not train on games that resulted in ties
-        if len(set(scores)) == 4:
-            is_model_available = self._trainer_client.send_training_example(self.encoded_boards, scores)
+        is_model_available = self._trainer_client.send_training_example(self.encoded_boards, self.targets)
 
-            if is_model_available:
-                del self.model
+        if is_model_available:
+            # After about 21 epochs, epsilon should have reached ~0.1
+            new_epsilon = self.epsilon * 0.9
+            self.epsilon = new_epsilon if new_epsilon > 0.1 else 0.1
 
-                self.model = tf.keras.models.load_model(self._trainer_client.remote_model_path)
+            self.update_model()
 
 
 
@@ -182,9 +245,8 @@ def start_worker(trainer_address, trainer_port):
     sys.stdout = open(f'logs/worker_log_{os.getpid()}.out', 'a')
     sys.stderr = open(f'logs/worker_error_{os.getpid()}.out', 'a')
 
-    from trainer import TrainerClient
-
     client = TrainerClient(trainer_address, trainer_port)
+    client.connect()
 
     try:
         LSTMAi().train(client)
@@ -205,6 +267,8 @@ if __name__ == '__main__':
     existing_logs = [file_name for file_name in os.listdir('logs/') if os.path.splitext(file_name)[1] == '.out']
     for existing_log in existing_logs:
         os.remove(f'logs/{existing_log}')
+
+    #start_worker(args.address, args.port)
 
     print(f'Initializing pool of {num_workers} workers... ', end='')
 
